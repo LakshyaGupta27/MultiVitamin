@@ -1,12 +1,13 @@
 #pragma once
 #include <JuceHeader.h>
-#include <unordered_set>
 #include "DspEngine.h"
 #include "FxNode.h"
+#include "ModSlider.h"
 
-class ControlPanel : public juce::Component,
-                     private juce::Timer,
-                     private juce::Slider::Listener {
+// Right-hand panel: one section per pentagon node (the FX type can change at
+// runtime), each with two mod-aware knobs, plus global dry/wet. Every knob is
+// a drag-and-drop modulation target with an animated modulation ring.
+class ControlPanel : public juce::Component, private juce::Timer {
 public:
     explicit ControlPanel(DspEngine& engine);
 
@@ -14,28 +15,20 @@ public:
     void resized() override;
 
 private:
-    void setupSection(int i, FxNode::Type type, const char* name,
-                      const char* p1Name, const char* p2Name);
-    void randomizeParams();
-
     void timerCallback() override;
-    void sliderDragStarted(juce::Slider* s) override { draggedSliders.insert(s); }
-    void sliderDragEnded  (juce::Slider* s) override { draggedSliders.erase(s); }
-    void sliderValueChanged(juce::Slider*)  override {}
+    void randomizeParams();
+    void refreshSection(int i);
 
     DspEngine& dspEngine;
-    std::unordered_set<juce::Slider*> draggedSliders;
 
-    struct EffectSection {
-        juce::Label  sectionLabel, p1Label, p2Label;
-        juce::Slider p1Slider, p2Slider;
-        FxNode::Type type = FxNode::Type::Delay;
+    struct NodeSection {
+        juce::Label sectionLabel;
+        std::unique_ptr<ModSlider> p1Knob, p2Knob;
+        FxNode::Type shownType = FxNode::Type::Delay;
     };
 
-    static constexpr int NUM_EFFECTS = 5;
-    std::array<EffectSection, NUM_EFFECTS> sections;
+    std::array<NodeSection, DspEngine::NUM_NODES> sections;
 
-    juce::Label      dryWetLabel  { {}, "Dry / Wet" };
-    juce::Slider     dryWetSlider;
+    std::unique_ptr<ModSlider> dryWetKnob;
     juce::TextButton randomizeBtn { "Randomize" };
 };

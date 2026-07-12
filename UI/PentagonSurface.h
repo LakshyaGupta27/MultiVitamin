@@ -4,7 +4,9 @@
 #include <array>
 #include <functional>
 
-class PentagonSurface : public juce::Component, private juce::Timer {
+class PentagonSurface : public juce::Component,
+                        public juce::DragAndDropTarget,
+                        private juce::Timer {
 public:
     explicit PentagonSurface(DspEngine& engine);
 
@@ -12,6 +14,12 @@ public:
     void resized() override;
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
+
+    // Drop a modulator on a node circle → routing to that node's mix weight
+    bool isInterestedInDragSource(const SourceDetails& details) override;
+    void itemDropped(const SourceDetails& details) override;
+    void itemDragMove(const SourceDetails& details) override;
+    void itemDragExit(const SourceDetails&) override { dragOverVertex = -1; repaint(); }
 
     std::function<void()> onWeightsChanged;
 
@@ -35,8 +43,10 @@ private:
 
     void updateWeights();
     void showNodeMenu(int nodeIndex);
+    int  vertexAt(juce::Point<float> p) const;   // -1 if none within reach
 
     juce::Point<float> cursor;  // base anchor set by mouse
     DspEngine& dspEngine;
     std::array<juce::String, N> nodeLabels;
+    int dragOverVertex = -1;    // vertex highlighted during a modulator drag
 };

@@ -1,71 +1,55 @@
 #include "ControlPanel.h"
 
 ControlPanel::ControlPanel(DspEngine& engine) : dspEngine(engine) {
-    setupSection(0, FxNode::Type::Delay,      "Delay",      "Time",      "Feedback");
-    setupSection(1, FxNode::Type::Reverb,     "Reverb",     "Room",      "Damp");
-    setupSection(2, FxNode::Type::Filter,     "Filter",     "Cutoff",    "Resonance");
-    setupSection(3, FxNode::Type::Granular,   "Granular",   "Size",      "Scatter");
-    setupSection(4, FxNode::Type::Distortion, "Distortion", "Drive",     "Mix");
+    for (int i = 0; i < DspEngine::NUM_NODES; ++i) {
+        auto& s = sections[(size_t)i];
 
-    dryWetLabel.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(dryWetLabel);
+        s.sectionLabel.setJustificationType(juce::Justification::centred);
+        s.sectionLabel.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        addAndMakeVisible(s.sectionLabel);
 
-    dryWetSlider.setRange(0.0, 1.0, 0.01);
-    dryWetSlider.setValue(dspEngine.globalDryWet.load(), juce::dontSendNotification);
-    dryWetSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-    dryWetSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 14);
-    dryWetSlider.onValueChange = [this] {
-        dspEngine.globalDryWet.store((float)dryWetSlider.getValue());
-    };
-    addAndMakeVisible(dryWetSlider);
+        for (int p = 0; p < 2; ++p) {
+            const int dest = p == 0 ? ModDest::nodeP1(i) : ModDest::nodeP2(i);
+            auto knob = std::make_unique<ModSlider>(dspEngine.modMatrix, dest, "");
+            knob->setValue(dspEngine.getNodeParam(i, p), juce::dontSendNotification);
+            knob->onValueChange = [this, i, p](float v) { dspEngine.setNodeParam(i, p, v); };
+            addAndMakeVisible(*knob);
+            (p == 0 ? s.p1Knob : s.p2Knob) = std::move(knob);
+        }
+
+        refreshSection(i);
+    }
+
+    dryWetKnob = std::make_unique<ModSlider>(dspEngine.modMatrix, ModDest::DryWet, "Dry / Wet");
+    dryWetKnob->setValue(dspEngine.globalDryWet.load(), juce::dontSendNotification);
+    dryWetKnob->setDefaultValue(0.7f);
+    dryWetKnob->onValueChange = [this](float v) { dspEngine.globalDryWet.store(v); };
+    addAndMakeVisible(*dryWetKnob);
 
     randomizeBtn.onClick = [this] { randomizeParams(); };
     addAndMakeVisible(randomizeBtn);
 
-    startTimerHz(60);
+    startTimerHz(10);
 }
 
-void ControlPanel::setupSection(int i, FxNode::Type type, const char* name,
-                                 const char* p1Name, const char* p2Name) {
-    auto& s = sections[i];
-    s.type = type;
+void ControlPanel::refreshSection(int i) {
+    auto& s = sections[(size_t)i];
+    const auto type = dspEngine.getNodeType(i);
+    s.shownType = type;
+    s.sectionLabel.setText("N" + juce::String(i + 1) + " \xc2\xb7 " + FxNode::typeName(type),
+                           juce::dontSendNotification);
 
-    s.sectionLabel.setText(name, juce::dontSendNotification);
-    s.sectionLabel.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(s.sectionLabel);
-
-    s.p1Label.setText(p1Name, juce::dontSendNotification);
-    s.p1Label.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(s.p1Label);
-
-    s.p2Label.setText(p2Name, juce::dontSendNotification);
-    s.p2Label.setJustificationType(juce::Justification::centred);
-    addAndMakeVisible(s.p2Label);
-
-    for (int p = 0; p < 2; ++p) {
-        auto& slider = (p == 0 ? s.p1Slider : s.p2Slider);
-        slider.setRange(0.0, 1.0, 0.01);
-        slider.setValue(0.5, juce::dontSendNotification);
-        slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 50, 14);
-        const int paramIdx = p;
-        slider.onValueChange = [this, type, &slider, paramIdx] {
-            for (int n = 0; n < DspEngine::NUM_NODES; ++n)
-                if (dspEngine.getNodeType(n) == type)
-                    dspEngine.setNodeParam(n, paramIdx, (float)slider.getValue());
-        };
-        slider.addListener(this);
-        addAndMakeVisible(slider);
+    // Param names come from the node itself so they follow the FX type.
+    juce::String p1 = "P1", p2 = "P2";
+    switch (type) {
+        case FxNode::Type::Delay:      p1 = "Time";   p2 = "Feedback";  break;
+        case FxNode::Type::Reverb:     p1 = "Room";   p2 = "Damp";      break;
+        case FxNode::Type::Filter:     p1 = "Cutoff"; p2 = "Resonance"; break;
+        case FxNode::Type::Granular:   p1 = "Size";   p2 = "Scatter";   break;
+        case FxNode::Type::Distortion: p1 = "Drive";  p2 = "Mix";       break;
     }
-
-    // Seed sliders from the first node of this type, if one exists
-    for (int n = 0; n < DspEngine::NUM_NODES; ++n) {
-        if (dspEngine.getNodeType(n) == type) {
-            s.p1Slider.setValue(dspEngine.getNodeParam(n, 0), juce::dontSendNotification);
-            s.p2Slider.setValue(dspEngine.getNodeParam(n, 1), juce::dontSendNotification);
-            break;
-        }
-    }
+    s.p1Knob->setLabel(p1);
+    s.p2Knob->setLabel(p2);
 }
 
 void ControlPanel::randomizeParams() {
@@ -73,30 +57,25 @@ void ControlPanel::randomizeParams() {
     for (int n = 0; n < DspEngine::NUM_NODES; ++n) {
         dspEngine.setNodeParam(n, 0, rng.nextFloat());
         dspEngine.setNodeParam(n, 1, rng.nextFloat());
-    }
-    for (auto& s : sections) {
-        for (int n = 0; n < DspEngine::NUM_NODES; ++n) {
-            if (dspEngine.getNodeType(n) == s.type) {
-                s.p1Slider.setValue(dspEngine.getNodeParam(n, 0), juce::dontSendNotification);
-                s.p2Slider.setValue(dspEngine.getNodeParam(n, 1), juce::dontSendNotification);
-                break;
-            }
-        }
+        sections[(size_t)n].p1Knob->setValue(dspEngine.getNodeParam(n, 0), juce::dontSendNotification);
+        sections[(size_t)n].p2Knob->setValue(dspEngine.getNodeParam(n, 1), juce::dontSendNotification);
     }
 }
 
 void ControlPanel::timerCallback() {
-    for (auto& s : sections) {
-        for (int n = 0; n < DspEngine::NUM_NODES; ++n) {
-            if (dspEngine.getNodeType(n) == s.type) {
-                if (!draggedSliders.count(&s.p1Slider))
-                    s.p1Slider.setValue(dspEngine.getNodeParam(n, 0), juce::dontSendNotification);
-                if (!draggedSliders.count(&s.p2Slider))
-                    s.p2Slider.setValue(dspEngine.getNodeParam(n, 1), juce::dontSendNotification);
-                break;
-            }
-        }
+    for (int i = 0; i < DspEngine::NUM_NODES; ++i) {
+        auto& s = sections[(size_t)i];
+        if (dspEngine.getNodeType(i) != s.shownType)
+            refreshSection(i);
+
+        // Follow external changes (preset load) unless the user is dragging.
+        if (!s.p1Knob->isMouseButtonDown())
+            s.p1Knob->setValue(dspEngine.getNodeParam(i, 0), juce::dontSendNotification);
+        if (!s.p2Knob->isMouseButtonDown())
+            s.p2Knob->setValue(dspEngine.getNodeParam(i, 1), juce::dontSendNotification);
     }
+    if (!dryWetKnob->isMouseButtonDown())
+        dryWetKnob->setValue(dspEngine.globalDryWet.load(), juce::dontSendNotification);
 }
 
 void ControlPanel::paint(juce::Graphics& g) {
@@ -112,23 +91,18 @@ void ControlPanel::resized() {
     auto r = getLocalBounds().reduced(8);
     r.removeFromTop(18); // title
 
+    const int sectionH = (r.getHeight() - 110) / DspEngine::NUM_NODES;
     for (auto& s : sections) {
-        s.sectionLabel.setBounds(r.removeFromTop(13));
-        auto row  = r.removeFromTop(76);
-        auto left = row.removeFromLeft(row.getWidth() / 2).reduced(2, 0);
-        auto right = row.reduced(2, 0);
-
-        s.p1Label.setBounds(left .removeFromTop(12));
-        s.p2Label.setBounds(right.removeFromTop(12));
-        s.p1Slider.setBounds(left);
-        s.p2Slider.setBounds(right);
-
-        r.removeFromTop(6);
+        auto sec = r.removeFromTop(sectionH);
+        s.sectionLabel.setBounds(sec.removeFromTop(13));
+        auto left  = sec.removeFromLeft(sec.getWidth() / 2).reduced(2, 0);
+        auto right = sec.reduced(2, 0);
+        s.p1Knob->setBounds(left);
+        s.p2Knob->setBounds(right);
     }
 
-    dryWetLabel .setBounds(r.removeFromTop(13));
-    dryWetSlider.setBounds(r.removeFromTop(76).withSizeKeepingCentre(70, 76));
-
-    r.removeFromTop(8);
-    randomizeBtn.setBounds(r.removeFromTop(26).reduced(4, 0));
+    r.removeFromTop(4);
+    dryWetKnob->setBounds(r.removeFromTop(78).withSizeKeepingCentre(84, 78));
+    r.removeFromTop(4);
+    randomizeBtn.setBounds(r.removeFromTop(24).reduced(4, 0));
 }

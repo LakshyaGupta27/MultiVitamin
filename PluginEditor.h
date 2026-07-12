@@ -2,10 +2,13 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 #include "PentagonSurface.h"
-#include "LfoManagerPanel.h"
+#include "ModulatorPanel.h"
 #include "ControlPanel.h"
 
-class PluginEditor : public juce::AudioProcessorEditor {
+// DragAndDropContainer: modulator handles are dragged from the ModulatorPanel
+// onto any ModSlider / pentagon vertex anywhere in the editor.
+class PluginEditor : public juce::AudioProcessorEditor,
+                     public juce::DragAndDropContainer {
 public:
     explicit PluginEditor(PluginProcessor& p);
     ~PluginEditor() override = default;
@@ -18,7 +21,7 @@ private:
 
     PentagonSurface pentagon;
     ControlPanel    controlPanel;
-    LfoManagerPanel lfoPanel;
+    ModulatorPanel  modulatorPanel;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginEditor)
 };

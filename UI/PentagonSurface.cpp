@@ -1,4 +1,6 @@
 #include "PentagonSurface.h"
+#include "ModSlider.h"
+#include "ModRoutingEditor.h"
 #include <cmath>
 #include <limits>
 
@@ -111,19 +113,41 @@ void PentagonSurface::resized() {
     updateWeights();
 }
 
+int PentagonSurface::vertexAt(juce::Point<float> p) const {
+    auto v = getVertices();
+    for (int i = 0; i < N; ++i)
+        if (p.getDistanceFrom(v[i]) < 40.0f) return i;
+    return -1;
+}
+
 void PentagonSurface::mouseDown(const juce::MouseEvent& e) {
     if (e.mods.isRightButtonDown()) {
-        auto v = getVertices();
-        for (int i = 0; i < N; ++i) {
-            if (e.position.getDistanceFrom(v[i]) < 35.0f) {
-                showNodeMenu(i);
-                return;
-            }
-        }
+        const int i = vertexAt(e.position);
+        if (i >= 0) showNodeMenu(i);
         return;
     }
     cursor = clampToPolygon(e.position);
     updateWeights();
+}
+
+// ── Modulator drag-and-drop onto node circles ─────────────────────────────────
+
+bool PentagonSurface::isInterestedInDragSource(const SourceDetails& details) {
+    return ModSlider::sourceIdFromDescription(details.description) >= 0;
+}
+
+void PentagonSurface::itemDragMove(const SourceDetails& details) {
+    const int v = vertexAt(details.localPosition.toFloat());
+    if (v != dragOverVertex) { dragOverVertex = v; repaint(); }
+}
+
+void PentagonSurface::itemDropped(const SourceDetails& details) {
+    const int src = ModSlider::sourceIdFromDescription(details.description);
+    const int v   = vertexAt(details.localPosition.toFloat());
+    if (src >= 0 && v >= 0)
+        dspEngine.modMatrix.addRouting(src, ModDest::nodeMix(v), 0.3f);
+    dragOverVertex = -1;
+    repaint();
 }
 
 void PentagonSurface::mouseDrag(const juce::MouseEvent& e) {
@@ -165,6 +189,32 @@ void PentagonSurface::paint(juce::Graphics& g) {
         g.setColour(col);
         g.drawEllipse(v[i].x - nodeR, v[i].y - nodeR, nodeR * 2.f, nodeR * 2.f, 1.5f);
 
+        // Modulation ring: shows that this node's mix weight is a routing
+        // target, plus the live offset as an arc (cw = positive, ccw = negative).
+        if (dspEngine.modMatrix.destHasRoutings(ModDest::nodeMix(i))) {
+            const float ringR = nodeR + 5.0f;
+            g.setColour(juce::Colour(0xff00c8ff).withAlpha(0.30f));
+            g.drawEllipse(v[i].x - ringR, v[i].y - ringR, ringR * 2.f, ringR * 2.f, 1.2f);
+
+            const float off = dspEngine.modMatrix.uiDestOffset[(size_t)ModDest::nodeMix(i)]
+                                  .load(std::memory_order_relaxed);
+            if (std::abs(off) > 1e-3f) {
+                juce::Path arc;
+                arc.addCentredArc(v[i].x, v[i].y, ringR, ringR, 0.0f,
+                                  0.0f, juce::jlimit(-1.0f, 1.0f, off)
+                                            * juce::MathConstants<float>::twoPi, true);
+                g.setColour(juce::Colour(0xff00c8ff));
+                g.strokePath(arc, juce::PathStrokeType(2.2f));
+            }
+        }
+
+        // Highlight while a modulator hovers over this vertex
+        if (dragOverVertex == i) {
+            const float hiR = nodeR + 9.0f;
+            g.setColour(juce::Colour(0xff00c8ff));
+            g.drawEllipse(v[i].x - hiR, v[i].y - hiR, hiR * 2.f, hiR * 2.f, 2.0f);
+        }
+
         g.setColour(juce::Colours::white);
         g.setFont(juce::FontOptions(11.0f));
         g.drawText("[" + juce::String(i) + "] " + nodeLabels[i],
@@ -194,7 +244,7 @@ void PentagonSurface::paint(juce::Graphics& g) {
     // Hint
     g.setColour(juce::Colours::grey.withAlpha(0.6f));
     g.setFont(juce::FontOptions(10.0f));
-    g.drawText("Drag to mix  |  Right-click node to change FX type",
+    g.drawText("Drag to mix  |  Right-click node for FX type & modulations  |  Drop a modulator on a node to modulate its mix",
                0, getHeight() - 16, getWidth(), 14,
                juce::Justification::centred, false);
 }
@@ -210,8 +260,18 @@ void PentagonSurface::showNodeMenu(int nodeIndex) {
     menu.addItem(4, "Reverb",     true, cur == FxNode::Type::Reverb);
     menu.addItem(5, "Filter",     true, cur == FxNode::Type::Filter);
 
+    if (dspEngine.modMatrix.destHasRoutings(ModDest::nodeMix(nodeIndex))) {
+        menu.addSeparator();
+        menu.addItem(100, "Edit Modulations...");
+    }
+
     menu.showMenuAsync(juce::PopupMenu::Options(), [this, nodeIndex](int result) {
         if (result == 0) return;
+        if (result == 100) {
+            ModRoutingEditor::show(dspEngine.modMatrix, ModDest::nodeMix(nodeIndex),
+                                   "Node " + juce::String(nodeIndex + 1) + " Mix", this);
+            return;
+        }
         FxNode::Type t = FxNode::Type::Granular;
         switch (result) {
             case 2: t = FxNode::Type::Distortion; break;

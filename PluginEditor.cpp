@@ -5,15 +5,15 @@ PluginEditor::PluginEditor(PluginProcessor& p)
       processor(p),
       pentagon(p.dspEngine),
       controlPanel(p.dspEngine),
-      lfoPanel(p.dspEngine)
+      modulatorPanel(p.dspEngine.modMatrix)
 {
     addAndMakeVisible(pentagon);
     addAndMakeVisible(controlPanel);
-    addAndMakeVisible(lfoPanel);
+    addAndMakeVisible(modulatorPanel);
 
-    setSize(920, 760);
+    setSize(980, 820);
     setResizable(true, true);
-    setResizeLimits(700, 550, 1400, 1100);
+    setResizeLimits(800, 660, 1500, 1200);
 }
 
 void PluginEditor::paint(juce::Graphics& g) {
@@ -22,13 +22,13 @@ void PluginEditor::paint(juce::Graphics& g) {
 
 void PluginEditor::resized() {
     auto bounds = getLocalBounds();
-    const int lfoHeight = 200;
-    const int sideWidth = 200;
+    const int modHeight = 290;
+    const int sideWidth = 210;
 
     auto sideArea = bounds.removeFromRight(sideWidth);
-    auto lfoArea  = bounds.removeFromBottom(lfoHeight);
+    auto modArea  = bounds.removeFromBottom(modHeight);
 
-    controlPanel.setBounds(sideArea);
-    lfoPanel    .setBounds(lfoArea);
-    pentagon    .setBounds(bounds);
+    controlPanel  .setBounds(sideArea);
+    modulatorPanel.setBounds(modArea);
+    pentagon      .setBounds(bounds);
 }

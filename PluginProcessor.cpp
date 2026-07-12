@@ -25,9 +25,32 @@ bool PluginProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const {
 }
 
 void PluginProcessor::processBlock(juce::AudioBuffer<float>& buffer,
-                                   juce::MidiBuffer& /*midi*/) {
+                                   juce::MidiBuffer& midi) {
     juce::ScopedNoDenormals noDenormals;
-    dspEngine.process(buffer, buffer.getNumSamples());
+
+    // Snapshot host transport for tempo-sync / transport-triggered modulators
+    TransportInfo transport;
+    if (auto* playHead = getPlayHead()) {
+        if (auto pos = playHead->getPosition()) {
+            if (auto bpm = pos->getBpm())         transport.bpm         = *bpm;
+            if (auto ppq = pos->getPpqPosition()) transport.ppqPosition = *ppq;
+            transport.isPlaying = pos->getIsPlaying();
+        }
+    }
+    transport.justStarted = transport.isPlaying && !wasPlaying;
+    wasPlaying = transport.isPlaying;
+
+    // Collect note events (sample-accurate envelope / XLFO triggering)
+    ModTriggerList triggers;
+    for (const auto metadata : midi) {
+        const auto msg = metadata.getMessage();
+        if (msg.isNoteOn())
+            triggers.add({ metadata.samplePosition, true, msg.getFloatVelocity() });
+        else if (msg.isNoteOff())
+            triggers.add({ metadata.samplePosition, false, 0.0f });
+    }
+
+    dspEngine.process(buffer, buffer.getNumSamples(), transport, triggers);
 }
 
 juce::AudioProcessorEditor* PluginProcessor::createEditor() {
@@ -51,18 +74,7 @@ void PluginProcessor::getStateInformation(juce::MemoryBlock& dest) {
         node->setAttribute("param2", (double)dspEngine.getNodeParam(n, 1));
     }
 
-    for (int i = 0; i < DspEngine::MAX_LFOS; ++i) {
-        auto& ls  = dspEngine.lfoStates[i];
-        auto* lfo = root.createNewChildElement("Lfo");
-        lfo->setAttribute("index",       i);
-        lfo->setAttribute("active",      ls.active.load());
-        lfo->setAttribute("shape",       ls.shape.load());
-        lfo->setAttribute("rate",        (double)ls.rate.load());
-        lfo->setAttribute("depth",       (double)ls.depth.load());
-        lfo->setAttribute("targetType",  ls.targetType.load());
-        lfo->setAttribute("targetNode",  ls.targetNode.load());
-        lfo->setAttribute("targetParam", ls.targetParam.load());
-    }
+    dspEngine.modMatrix.toXml(root);
 
     copyXmlToBinary(root, dest);
 }
@@ -83,18 +95,7 @@ void PluginProcessor::setStateInformation(const void* data, int sizeInBytes) {
         dspEngine.setNodeParam(n, 1, (float)node->getDoubleAttribute("param2", 0.5));
     }
 
-    for (auto* lfo : xml->getChildWithTagNameIterator("Lfo")) {
-        const int i = lfo->getIntAttribute("index");
-        if (i < 0 || i >= DspEngine::MAX_LFOS) continue;
-        auto& ls = dspEngine.lfoStates[i];
-        ls.active     .store(lfo->getBoolAttribute ("active"));
-        ls.shape      .store(lfo->getIntAttribute  ("shape"));
-        ls.rate       .store((float)lfo->getDoubleAttribute("rate",  0.5));
-        ls.depth      .store((float)lfo->getDoubleAttribute("depth", 0.3));
-        ls.targetType .store(lfo->getIntAttribute  ("targetType"));
-        ls.targetNode .store(lfo->getIntAttribute  ("targetNode"));
-        ls.targetParam.store(lfo->getIntAttribute  ("targetParam"));
-    }
+    dspEngine.modMatrix.fromXml(*xml);
 }
 
 // Required by JUCE to instantiate the plugin

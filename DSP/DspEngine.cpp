@@ -1,19 +1,17 @@
 #include "DspEngine.h"
 
 DspEngine::DspEngine() {
-    for (int i = 0; i < NUM_NODES; ++i) {
-        nodes[i] = FxNode::create(FxNode::Type::Delay);
-        baseWeights[i].store(1.0f / NUM_NODES);
-        effectiveWeights[i].store(1.0f / NUM_NODES);
-    }
-    // Give each node a different default type
-    nodes[1]->param1.store(0.5f); // will be set properly after prepare
     static const FxNode::Type defaults[NUM_NODES] = {
         FxNode::Type::Delay, FxNode::Type::Reverb, FxNode::Type::Filter,
         FxNode::Type::Granular, FxNode::Type::Distortion
     };
-    for (int i = 0; i < NUM_NODES; ++i)
+    for (int i = 0; i < NUM_NODES; ++i) {
         nodes[i] = FxNode::create(defaults[i]);
+        baseWeights[i].store(1.0f / NUM_NODES);
+        effectiveWeights[i].store(1.0f / NUM_NODES);
+        paramBase[i][0].store(0.5f);
+        paramBase[i][1].store(0.5f);
+    }
 }
 
 void DspEngine::prepare(double sr, int maxBlock, int numCh) {
@@ -26,13 +24,13 @@ void DspEngine::prepare(double sr, int maxBlock, int numCh) {
     gainComp.fill(1.0f);
     gainSmoothCoeff = (float)std::exp(-1.0 / (sr * 0.2));
 
+    modMatrix.prepare(sr, maxBlock);
+
     juce::SpinLock::ScopedLockType lock(nodeLock);
     for (int n = 0; n < NUM_NODES; ++n) {
         nodeBuffers[n].setSize(numCh, maxBlock);
         nodes[n]->prepare(sr, maxBlock, numCh);
     }
-    for (auto& ls : lfoStates)
-        ls.lfo.sampleRate = sr;
 
     prepared = true;
 }
@@ -61,107 +59,59 @@ FxNode::Type DspEngine::getNodeType(int nodeIndex) const {
 
 void DspEngine::setNodeParam(int nodeIndex, int paramIndex, float value) {
     jassert(nodeIndex >= 0 && nodeIndex < NUM_NODES);
-    if (paramIndex == 0) nodes[nodeIndex]->param1.store(value);
-    else                 nodes[nodeIndex]->param2.store(value);
+    paramBase[nodeIndex][paramIndex == 0 ? 0 : 1].store(value);
 }
 
 float DspEngine::getNodeParam(int nodeIndex, int paramIndex) const {
     jassert(nodeIndex >= 0 && nodeIndex < NUM_NODES);
-    return paramIndex == 0 ? nodes[nodeIndex]->param1.load()
-                           : nodes[nodeIndex]->param2.load();
+    return paramBase[nodeIndex][paramIndex == 0 ? 0 : 1].load();
 }
 
-void DspEngine::applyLfos(std::array<float, NUM_NODES>& weights, int numSamples) {
-    // Phase 1 — load base params from atomics; apply inter-LFO modulation
-    // from the PREVIOUS block's outputs (one-block latency, non-recursive).
-    for (auto& ls : lfoStates) {
-        ls.lfo.shape = (Lfo::Shape)ls.shape.load(std::memory_order_relaxed);
-        ls.lfo.rate  = ls.rate.load(std::memory_order_relaxed);
-        ls.lfo.depth = ls.depth.load(std::memory_order_relaxed);
-    }
-    for (int i = 0; i < MAX_LFOS; ++i) {
-        auto& src = lfoStates[i];
-        if (!src.active.load(std::memory_order_relaxed)) continue;
-        const int tType = src.targetType.load(std::memory_order_relaxed);
-        const int tNode = src.targetNode.load(std::memory_order_relaxed);
-        if (tType == 1 && tNode >= 0 && tNode < MAX_LFOS) {
-            // Modulate target LFO's rate with this LFO's previous-block output
-            auto& tgt = lfoStates[tNode];
-            tgt.lfo.rate = juce::jlimit(0.01f, 20.0f, tgt.lfo.rate + src.lfo.prevOutput);
-        } else if (tType == 2 && tNode >= 0 && tNode < MAX_LFOS) {
-            auto& tgt = lfoStates[tNode];
-            tgt.lfo.depth = juce::jlimit(0.0f, 1.0f, tgt.lfo.depth + src.lfo.prevOutput);
-        }
-    }
-
-    // Store effective rate/depth so the UI can display modulated values.
-    for (auto& ls : lfoStates) {
-        ls.effectiveRate .store(ls.lfo.rate,  std::memory_order_relaxed);
-        ls.effectiveDepth.store(ls.lfo.depth, std::memory_order_relaxed);
-    }
-
-    // Phase 2 — tick every active LFO; store output for next block's Phase 1.
-    for (auto& ls : lfoStates) {
-        if (!ls.active.load(std::memory_order_relaxed)) {
-            ls.lfo.prevOutput = 0.0f;
-            continue;
-        }
-        ls.lfo.prevOutput = ls.lfo.process(numSamples);
-    }
-
-    // Phase 3 — apply LFO→node modulations using this block's fresh outputs.
-    for (int i = 0; i < MAX_LFOS; ++i) {
-        auto& ls = lfoStates[i];
-        if (!ls.active.load(std::memory_order_relaxed)) continue;
-        if (ls.targetType.load(std::memory_order_relaxed) != 0) continue;
-
-        const float mod   = ls.lfo.prevOutput;
-        const int   node  = ls.targetNode.load(std::memory_order_relaxed);
-        const int   param = ls.targetParam.load(std::memory_order_relaxed);
-        if (node < 0 || node >= NUM_NODES) continue;
-
-        if (param == 0) {
-            weights[node] = juce::jlimit(0.0f, 1.0f, weights[node] + mod);
-        } else if (param == 1) {
-            auto& p = nodes[node]->param1;
-            p.store(juce::jlimit(0.0f, 1.0f, p.load() + mod));
-        } else {
-            auto& p = nodes[node]->param2;
-            p.store(juce::jlimit(0.0f, 1.0f, p.load() + mod));
-        }
-    }
-}
-
-void DspEngine::process(juce::AudioBuffer<float>& buffer, int numSamples) {
+void DspEngine::process(juce::AudioBuffer<float>& buffer, int numSamples,
+                        const TransportInfo& transport, const ModTriggerList& triggers) {
     if (!prepared) { buffer.clear(); return; }
 
     juce::SpinLock::ScopedTryLockType tryLock(nodeLock);
     if (!tryLock.isLocked()) { buffer.clear(); return; }
 
-    // Compute effective weights (base + LFO)
-    std::array<float, NUM_NODES> ew;
-    for (int i = 0; i < NUM_NODES; ++i)
-        ew[i] = juce::jmax(0.0f, baseWeights[i].load(std::memory_order_relaxed));
+    // ── Run the modulation system for this block ─────────────────────────────
+    // buffer still holds the dry input here — envelope followers track it.
+    modMatrix.processBlock(buffer, transport, triggers, numSamples);
 
-    applyLfos(ew, numSamples);
+    // Node params: base + matrix offset, applied per block (FX read them once).
+    for (int n = 0; n < NUM_NODES; ++n) {
+        for (int pi = 0; pi < 2; ++pi) {
+            const int dest = pi == 0 ? ModDest::nodeP1(n) : ModDest::nodeP2(n);
+            float v = paramBase[n][pi].load(std::memory_order_relaxed);
+            if (const float* off = modMatrix.getDestOffsets(dest, 0))
+                v += off[0];
+            auto& target = pi == 0 ? nodes[n]->param1 : nodes[n]->param2;
+            target.store(juce::jlimit(0.0f, 1.0f, v));
+        }
+    }
 
-    float total = 0.0f;
-    for (float w : ew) total += w;
-    if (total < 1e-6f) { buffer.clear(); return; }
-    for (float& w : ew) w /= total;
-    for (int i = 0; i < NUM_NODES; ++i)
-        effectiveWeights[i].store(ew[i]);
+    // ── Decide which nodes run this block ────────────────────────────────────
+    std::array<float, NUM_NODES> base;
+    std::array<const float*, NUM_NODES> wOffL {}, wOffR {};
+    std::array<bool, NUM_NODES> runNode {};
+    bool anyRuns = false;
+
+    for (int n = 0; n < NUM_NODES; ++n) {
+        base[n]  = juce::jmax(0.0f, baseWeights[n].load(std::memory_order_relaxed));
+        wOffL[n] = modMatrix.getDestOffsets(ModDest::nodeMix(n), 0);
+        wOffR[n] = modMatrix.getDestOffsets(ModDest::nodeMix(n), 1);
+        runNode[n] = base[n] > 1e-4f || wOffL[n] != nullptr;
+        anyRuns |= runNode[n];
+    }
+    if (!anyRuns) { buffer.clear(); return; }
 
     // Save dry copy
     for (int ch = 0; ch < numChannels && ch < buffer.getNumChannels(); ++ch)
         dryBuffer.copyFrom(ch, 0, buffer, ch, 0, numSamples);
 
-    // Process each node and accumulate wet output
-    juce::AudioBuffer<float> wetOut(numChannels, numSamples);
-    wetOut.clear();
-
+    // ── Process nodes (with per-block RMS gain compensation) ─────────────────
     for (int n = 0; n < NUM_NODES; ++n) {
-        if (ew[n] < 1e-4f) continue;
+        if (!runNode[n]) continue;
         for (int ch = 0; ch < numChannels && ch < buffer.getNumChannels(); ++ch)
             nodeBuffers[n].copyFrom(ch, 0, buffer, ch, 0, numSamples);
 
@@ -183,22 +133,55 @@ void DspEngine::process(juce::AudioBuffer<float>& buffer, int numSamples) {
                 gainComp[n] = gainComp[n] * gainSmoothCoeff + target * (1.0f - gainSmoothCoeff);
             }
         }
-
-        for (int ch = 0; ch < numChannels && ch < nodeBuffers[n].getNumChannels(); ++ch)
-            nodeBuffers[n].applyGain(ch, 0, numSamples, gainComp[n]);
-
-        for (int ch = 0; ch < numChannels && ch < nodeBuffers[n].getNumChannels(); ++ch)
-            wetOut.addFrom(ch, 0, nodeBuffers[n], ch, 0, numSamples, ew[n]);
+        nodeBuffers[n].applyGain(0, numSamples, gainComp[n]);
     }
 
-    // Blend dry/wet
-    const float wet = globalDryWet.load();
-    const float dry = 1.0f - wet;
+    // ── Sample-accurate mix: weights and dry/wet vary per sample ─────────────
+    const float dryWetBase = globalDryWet.load(std::memory_order_relaxed);
+    const float* dwOff[2] = { modMatrix.getDestOffsets(ModDest::DryWet, 0),
+                              modMatrix.getDestOffsets(ModDest::DryWet, 1) };
+
     for (int ch = 0; ch < numChannels && ch < buffer.getNumChannels(); ++ch) {
-        auto* out    = buffer.getWritePointer(ch);
+        auto*       out    = buffer.getWritePointer(ch);
         const auto* dryPtr = dryBuffer.getReadPointer(ch);
-        const auto* wetPtr = wetOut.getReadPointer(ch);
-        for (int i = 0; i < numSamples; ++i)
-            out[i] = dry * dryPtr[i] + wet * wetPtr[i];
+        const auto  offs   = ch == 0 ? wOffL : wOffR;
+
+        for (int i = 0; i < numSamples; ++i) {
+            // Per-sample normalized node weights
+            float w[NUM_NODES];
+            float total = 0.0f;
+            for (int n = 0; n < NUM_NODES; ++n) {
+                float v = base[n];
+                if (offs[n] != nullptr) v += offs[n][i];
+                w[n] = juce::jmax(0.0f, v);
+                total += w[n];
+            }
+
+            float wetSample = 0.0f;
+            if (total > 1e-6f)
+                for (int n = 0; n < NUM_NODES; ++n)
+                    if (runNode[n] && w[n] > 0.0f)
+                        wetSample += nodeBuffers[n].getReadPointer(ch)[i] * (w[n] / total);
+
+            float wet = dryWetBase;
+            if (dwOff[ch] != nullptr) wet += dwOff[juce::jmin(ch, 1)][i];
+            wet = juce::jlimit(0.0f, 1.0f, wet);
+
+            out[i] = (1.0f - wet) * dryPtr[i] + wet * wetSample;
+        }
+    }
+
+    // Publish effective weights (last sample, L) for the pentagon display
+    {
+        float w[NUM_NODES]; float total = 0.0f;
+        const int last = numSamples - 1;
+        for (int n = 0; n < NUM_NODES; ++n) {
+            float v = base[n];
+            if (wOffL[n] != nullptr) v += wOffL[n][last];
+            w[n] = juce::jmax(0.0f, v); total += w[n];
+        }
+        for (int n = 0; n < NUM_NODES; ++n)
+            effectiveWeights[n].store(total > 1e-6f ? w[n] / total : 0.0f,
+                                      std::memory_order_relaxed);
     }
 }
